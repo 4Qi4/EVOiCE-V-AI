@@ -183,6 +183,10 @@ class PianoRoll(tk.Frame):
         self.canvas.focus_set()
         self.draw_grid()
 
+        # 全局波形预览区域（位于钢琴卷帘下方）
+        self.wave_canvas = tk.Canvas(self, height=50, bg='#EAEAEA', highlightthickness=0)
+        self.wave_canvas.pack(fill=tk.X, side=tk.BOTTOM)
+
     # --- 公共方法 ---
     def set_select_callback(self, cb): self.on_select_callback = cb
     def set_auto_pitch(self, enabled):
@@ -554,6 +558,12 @@ class PianoRoll(tk.Frame):
         if note['end'] + 2 > self.total_seconds: self.total_seconds = round(note['end'] + 2)
         self.draw_grid()
         self.select_note(note)
+        # 自动保存（如果编辑器存在）
+        try:
+            if hasattr(self.master, 'master') and hasattr(self.master.master, 'auto_save'):
+                self.master.master.auto_save()
+        except:
+            pass
 
     def modify_note(self, note_id, **kwargs):
         note = next((n for n in self.notes if n['id'] == note_id), None)
@@ -599,6 +609,8 @@ class EditorPage(tk.Frame):
         super().__init__(master, bg=STYLE['bg'])
         self.app = app
         self.project_path = None
+        self.auto_save_dir = "auto_save"
+        os.makedirs(self.auto_save_dir, exist_ok=True)
 
         main = tk.Frame(self, bg=STYLE['bg'])
         main.pack(fill=tk.BOTH, expand=True)
@@ -803,12 +815,12 @@ class EditorPage(tk.Frame):
             messagebox.showerror("错误", f"提取失败：{e}")
 
     def save_project(self):
-        if not self.project_path:
-            self.project_path = filedialog.asksaveasfilename(defaultextension=".evgc", filetypes=[("EVOiCE工程", "*.evgc")])
-        if self.project_path:
-            data = self.piano.get_project_data()
-            with open(self.project_path, 'w', encoding='utf-8') as f: json.dump(data, f, indent=2)
-            self.app.add_recent(self.project_path)
+        # 用户手动保存时，可选择路径，同时更新 project_path
+        path = filedialog.asksaveasfilename(defaultextension=".evgc", filetypes=[("EVOiCE工程", "*.evgc")])
+        if path:
+            self.project_path = path
+            self.user_project_name = os.path.splitext(os.path.basename(path))[0]
+            self.auto_save()
 
     def open_project(self):
         path = filedialog.askopenfilename(filetypes=[("EVOiCE工程", "*.evgc")])
@@ -817,6 +829,57 @@ class EditorPage(tk.Frame):
             self.piano.load_project_data(data)
             self.project_path = path
             self.app.add_recent(path)
+
+    def auto_save(self):
+        """每次添加音符时自动保存"""
+        if not self.project_path:
+            # 生成自动文件名
+            now = datetime.now()
+            timestamp = now.strftime("%Y-%m-%d-%H-%M")
+            base = "untitled"
+            if hasattr(self, 'user_project_name'):
+                base = self.user_project_name
+            filename = f"{timestamp}-{base}.evgc"
+            self.project_path = os.path.join(self.auto_save_dir, filename)
+        # 保存工程数据（含颤音和歌手信息）
+        data = {
+            'bpm': self.piano.bpm,
+            'notes': [{k: v for k, v in n.items() if k != 'id'} for n in self.piano.notes],
+            'manual_curves': self.piano.manual_curves,
+            'singer': self.singer_var.get() if hasattr(self, 'singer_var') else '默认歌手',
+        }
+        with open(self.project_path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2)
+
+    def show_singer_info(self):
+        singers_dir = self.app.singers_dir
+        info = ""
+        if os.path.isdir(singers_dir):
+            for singer in os.listdir(singers_dir):
+                singer_path = os.path.join(singers_dir, singer)
+                if os.path.isdir(singer_path):
+                    wavs = [f for f in os.listdir(singer_path) if f.endswith('.wav')]
+                    info += f"🎵 {singer}：{len(wavs)} 个音源\n"
+                    for w in wavs:
+                        info += f"    {w}\n"
+        if info:
+            messagebox.showinfo("已安装歌手", info)
+        else:
+            messagebox.showinfo("提示", "未找到歌手")
+
+    def load_project(self, path):
+        with open(path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        self.piano.load_project_data(data)
+        # 恢复手动曲线
+        self.piano.manual_curves = data.get('manual_curves', {})
+        # 恢复歌手选择
+        singer = data.get('singer', '默认歌手')
+        if hasattr(self, 'singer_combo') and singer in self.singer_combo['values']:
+            self.singer_var.set(singer)
+            self.select_singer()
+        self.project_path = path
+        self.user_project_name = os.path.splitext(os.path.basename(path))[0]
 
     def back_to_home(self): self.app.show_home()
 
